@@ -1,0 +1,91 @@
+/etc/rc.local
+
+#!/bin/bash
+
+# Add a delay to allow network initialization
+sleep 10
+
+# Define constants
+DEVICE_INFO_FILE="/etc/device_info.conf"
+NODE_SERVER_URL="http://192.168.8.223:5050/add-new-device"
+VENV_PYTHON="/home/pi/env/bin/python3"
+SENSOR_SCRIPT="/home/pi/dht22_sender.py"
+LOG_FILE="/var/log/device_script.log"
+
+# Function to get the MAC address of wlan0 (Wi-Fi interface)
+get_mac_address() {
+    cat /sys/class/net/wlan0/address 2>/dev/null || echo "00:00:00:00:00:00"
+}
+
+# Function to send device info to the server with retry
+send_device_info() {
+    local device_name="$1"
+    local mac_address="$2"
+    local status="active"
+    local device_location="$3"
+
+    echo "Sending data: $device_name, $mac_address, $status, $device_location" >> "$LOG_FILE"
+
+    for attempt in {1..5}; do
+        curl -s -o /dev/null -w "%{http_code}" -X POST "$NODE_SERVER_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"device_name\": \"$device_name\", \"mac_address\": \"$mac_address\", \"status\": \"$status\", \"device_location\": \"$device_location\"}" \
+            >> "$LOG_FILE" 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "✅ Device info sent successfully on attempt $attempt" >> "$LOG_FILE"
+            break
+        else
+            echo "❌ Attempt $attempt failed. Retrying in 5s..." >> "$LOG_FILE"
+            sleep 5
+        fi
+    done
+}
+
+# Ensure Wi-Fi credentials exist before attempting connection
+if grep -q "ssid=" /etc/wpa_supplicant/wpa_supplicant.conf; then
+    echo "Wi-Fi configuration found. Attempting to connect to Wi-Fi..." >> "$LOG_FILE"
+    wpa_supplicant -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf -B
+    dhclient wlan0
+
+    for i in {1..10}; do
+        sleep 5
+        if ping -c 1 -W 5 google.com > /dev/null 2>&1; then
+            echo "✅ Wi-Fi connected successfully." >> "$LOG_FILE"
+
+            if [[ -f "$DEVICE_INFO_FILE" ]]; then
+                DEVICE_NAME=$(grep -oP 'device_name=\K.*' "$DEVICE_INFO_FILE")
+                DEVICE_LOCATION=$(grep -oP 'device_location=\K.*' "$DEVICE_INFO_FILE")
+            else
+                DEVICE_NAME="unknown_device"
+                DEVICE_LOCATION="unknown_location"
+            fi
+
+            MAC_ADDRESS=$(get_mac_address)
+            send_device_info "$DEVICE_NAME" "$MAC_ADDRESS" "$DEVICE_LOCATION"
+
+            break
+        fi
+    done
+
+    if ! ping -c 1 -W 5 google.com > /dev/null 2>&1; then
+        echo "❌ Wi-Fi connection failed. Starting hotspot..." >> "$LOG_FILE"
+        /sbin/ifconfig wlan0 192.168.4.1 netmask 255.255.255.0 up
+        systemctl restart dnsmasq
+        systemctl restart hostapd
+    fi
+else
+    echo "⚠️ No Wi-Fi configuration found. Starting hotspot..." >> "$LOG_FILE"
+    /sbin/ifconfig wlan0 192.168.4.1 netmask 255.255.255.0 up
+    systemctl restart dnsmasq
+    systemctl restart hostapd
+fi
+
+# Start the Flask web interface in the background
+nohup python3 /etc/wifi_setup.py > /dev/null 2>&1 &
+
+# Start the sensor logger in the background using the virtual environment
+cd /home/pi
+nohup "$VENV_PYTHON" "$SENSOR_SCRIPT" >> /var/log/sensor.log 2>&1 &
+
+exit 0

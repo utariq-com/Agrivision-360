@@ -7,7 +7,7 @@ services:
       - "5050:5050"
     volumes:
       - ./server:/app
-      - /app/node_modules  # Avoid overwriting node_modules in container
+      - /app/node_modules
     environment:
       - NODE_ENV=development
     networks:
@@ -26,7 +26,7 @@ services:
     tty: true
     environment:
       - NODE_ENV=development
-      - CHOKIDAR_USEPOLLING=true  # Helps with hot reload in Docker
+      - CHOKIDAR_USEPOLLING=true 
     networks:
       - redkrystalNet001
     depends_on:
